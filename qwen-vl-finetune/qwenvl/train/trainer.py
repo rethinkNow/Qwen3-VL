@@ -79,31 +79,45 @@ def flash_attention_forward(
         else:
             target_dtype = next(layer for layer in module.modules() if isinstance(layer, torch.nn.Linear)).weight.dtype
 
-    query = query.squeeze(0)
-    key = key.squeeze(0)
-    value = value.squeeze(0)
-    cu_seqlens = attention_mask
+    # During model.generate(), attention_mask is a 2D mask, not packed cu_seqlens.
+    # Fall back to standard flash attention in that case.
+    if attention_mask is not None and attention_mask.dim() == 1 and attention_mask.dtype == torch.int32:
+        # Training mode: packed sequences with cu_seqlens
+        query = query.squeeze(0)
+        key = key.squeeze(0)
+        value = value.squeeze(0)
+        cu_seqlens = attention_mask
 
-    with torch.no_grad():
-        max_seqlen = max(
-            [
+        with torch.no_grad():
+            seqlen_list = [
                 cu_seqlens[idx + 1] - cu_seqlens[idx]
                 for idx in range(cu_seqlens.size(0) - 1)
             ]
-        ).item()
+            if not seqlen_list:
+                max_seqlen = query.size(0)
+            else:
+                max_seqlen = max(seqlen_list).item()
 
-    attn_output = flash_attn_varlen_func(
-        query,
-        key,
-        value,
-        cu_seqlens_q=cu_seqlens,
-        cu_seqlens_k=cu_seqlens,
-        max_seqlen_q=max_seqlen,
-        max_seqlen_k=max_seqlen,
-        causal=True,
-    )
-
-    attn_output = attn_output.unsqueeze(0)
+        attn_output = flash_attn_varlen_func(
+            query,
+            key,
+            value,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_k=cu_seqlens,
+            max_seqlen_q=max_seqlen,
+            max_seqlen_k=max_seqlen,
+            causal=True,
+        )
+        attn_output = attn_output.unsqueeze(0)
+    else:
+        # Generate mode: use standard flash attention (not varlen)
+        from flash_attn import flash_attn_func
+        attn_output = flash_attn_func(
+            query,
+            key,
+            value,
+            causal=True,
+        )
 
     return attn_output, None
 
@@ -212,6 +226,9 @@ def return_mask(
     return attention_mask
 
 
+# Store original forward methods before patching (used by mini eval to restore for generate)
+_original_forwards = {}
+
 def replace_qwen2_vl_attention_class():
     import transformers
     import transformers.modeling_flash_attention_utils
@@ -236,7 +253,13 @@ def replace_qwen2_vl_attention_class():
     transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.create_sliding_window_causal_mask = (
         return_mask
     )
-    ## qwen3vl
+    ## qwen3vl — save originals before patching
+    _original_forwards["models.qwen3_vl.modeling_qwen3_vl.Qwen3VLTextAttention.forward"] = (
+        transformers.models.qwen3_vl.modeling_qwen3_vl.Qwen3VLTextAttention.forward
+    )
+    _original_forwards["models.qwen3_vl.modeling_qwen3_vl.create_causal_mask"] = (
+        transformers.models.qwen3_vl.modeling_qwen3_vl.create_causal_mask
+    )
     transformers.models.qwen3_vl.modeling_qwen3_vl.Qwen3VLTextAttention.forward = (
         qwen3vl_forward
     )

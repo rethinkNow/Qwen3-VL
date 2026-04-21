@@ -184,8 +184,41 @@ def train(attn_implementation="flash_attention_2"):
             model.model.print_trainable_parameters()
     
     data_module = make_supervised_data_module(processor, data_args=data_args)
+
+    # Set up eval callback if configured
+    callbacks = []
+    if training_args.eval_steps_custom > 0:
+        from qwenvl.eval.callback import EvalCallback
+        eval_callback = EvalCallback(
+            eval_steps=training_args.eval_steps_custom,
+            eval_mode=training_args.eval_mode,
+            eval_subset_size=training_args.eval_subset_size,
+            eval_benchmarks=training_args.eval_benchmarks,
+            processor=processor,
+        )
+        callbacks.append(eval_callback)
+        rank0_print(
+            f"Eval callback enabled: every {training_args.eval_steps_custom} steps, "
+            f"mode={training_args.eval_mode}, subset_size={training_args.eval_subset_size}, "
+            f"benchmarks={training_args.eval_benchmarks}"
+        )
+
+    # Wandb mini eval callback
+    if training_args.sample_log_steps > 0:
+        from qwenvl.train.logging_callback import WandbTrainingCallback
+        wandb_callback = WandbTrainingCallback(
+            processor=processor,
+            sample_log_steps=training_args.sample_log_steps,
+            num_samples_per_bench=training_args.sample_log_count,
+            num_workers=training_args.sample_log_workers,
+        )
+        callbacks.append(wandb_callback)
+        rank0_print(f"Wandb mini eval enabled: every {training_args.sample_log_steps} steps, {training_args.sample_log_count} samples/bench")
+
     trainer = Trainer(
-        model=model, processing_class=tokenizer, args=training_args, **data_module
+        model=model, processing_class=tokenizer, args=training_args,
+        callbacks=callbacks,
+        **data_module,
     )
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):

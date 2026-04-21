@@ -1,3 +1,4 @@
+import os
 import re
 
 # Define placeholders for dataset paths
@@ -26,12 +27,18 @@ VIDEOCHATGPT = {
     "data_path": "PATH_TO_VIDEOCHATGPT_DATA",
 }
 
+CHOTAVLM_CHARADES = {
+    "annotation_path": os.environ.get("DATA_PATH", "/home/mars_rover/model_disk/chotaVLM/annotations/exports/charades-ego-50.train.jsonl"),
+    "data_path": "",
+}
+
 data_dict = {
     "cambrian_737k": CAMBRIAN_737K,
     "cambrian_737k_pack": CAMBRIAN_737K_PACK,
     "mp_doc": MP_DOC,
     "clevr_mc": CLEVR_MC,
     "videochatgpt": VIDEOCHATGPT,
+    "chotavlm_charades": CHOTAVLM_CHARADES,
 }
 
 
