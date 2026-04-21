@@ -35,11 +35,13 @@ class WandbTrainingCallback(TrainerCallback):
         self._eval_thread = None
 
     def on_train_begin(self, args, state, control, **kwargs):
-        """Log training data samples at the start."""
+        """Log training config + data samples at the start."""
         if args.local_rank not in (-1, 0):
             return
         if wandb.run is None:
             return
+
+        self._log_training_config(args)
         self._log_training_data_samples(kwargs.get("train_dataloader"))
 
     def on_step_end(self, args, state, control, model=None, **kwargs):
@@ -240,6 +242,69 @@ class WandbTrainingCallback(TrainerCallback):
             logger.warning(f"Failed to log eval table: {e}")
             import traceback
             traceback.print_exc()
+
+    def _log_training_config(self, args):
+        """Log full training config to wandb independently."""
+        try:
+            import json
+
+            config = {
+                # Model
+                "model": args.model_name_or_path if hasattr(args, "model_name_or_path") else "",
+
+                # Optimization
+                "learning_rate": args.learning_rate,
+                "lr_scheduler_type": str(args.lr_scheduler_type),
+                "warmup_ratio": args.warmup_ratio,
+                "warmup_steps": args.warmup_steps,
+                "weight_decay": args.weight_decay,
+                "adam_beta1": args.adam_beta1,
+                "adam_beta2": args.adam_beta2,
+                "adam_epsilon": args.adam_epsilon,
+                "max_grad_norm": args.max_grad_norm,
+                "optim": args.optim,
+
+                # Batch / steps
+                "per_device_train_batch_size": args.per_device_train_batch_size,
+                "gradient_accumulation_steps": args.gradient_accumulation_steps,
+                "num_train_epochs": args.num_train_epochs,
+                "max_steps": args.max_steps,
+
+                # Precision / memory
+                "bf16": args.bf16,
+                "fp16": args.fp16,
+                "gradient_checkpointing": args.gradient_checkpointing,
+
+                # Model config
+                "model_max_length": getattr(args, "model_max_length", None),
+
+                # Save
+                "save_strategy": str(args.save_strategy),
+                "save_steps": args.save_steps,
+                "save_total_limit": args.save_total_limit,
+
+                # Mini eval
+                "sample_log_steps": getattr(args, "sample_log_steps", 0),
+                "sample_log_count": getattr(args, "sample_log_count", 0),
+
+                # Output
+                "output_dir": args.output_dir,
+                "run_name": args.run_name,
+            }
+
+            # DeepSpeed config
+            if args.deepspeed:
+                ds_path = args.deepspeed
+                if os.path.exists(ds_path):
+                    with open(ds_path) as f:
+                        config["deepspeed"] = json.load(f)
+                else:
+                    config["deepspeed"] = ds_path
+
+            wandb.config.update({"training": config}, allow_val_change=True)
+            logger.info("Training config logged to wandb")
+        except Exception as e:
+            logger.warning(f"Failed to log training config: {e}")
 
     def _log_training_data_samples(self, train_dataloader):
         """Log a batch of training data to wandb with clean formatting."""
