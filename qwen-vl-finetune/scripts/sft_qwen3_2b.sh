@@ -41,7 +41,7 @@ run_name=${RUN_NAME:-"chotavlm-v0-2b"}
 output_dir=${OUTPUT_DIR:-"/home/mars_rover/model_disk/checkpoints/${run_name}"}
 
 # === Checkpoint parameters ===
-save_steps=${SAVE_STEPS:-500}
+save_steps=${SAVE_STEPS:-124}
 save_total_limit=${SAVE_TOTAL_LIMIT:-}       # empty: keep all checkpoints
 
 # === Cache ===

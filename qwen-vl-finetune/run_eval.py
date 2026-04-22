@@ -1,5 +1,72 @@
-import sys, time, json, os, argparse
+import sys, time, json, os, argparse, math
 sys.path.insert(0, ".")
+
+# === chotaVLM training-time overrides ===
+# These MUST match training to get eval ≡ training behavior.
+# Sources of truth in the training repo:
+#   - qwenvl/data/data_processor.py:_patch_qwen3vl_smart_resize  (per-frame video cap)
+#   - scripts/sft_qwen3_2b.sh: --video_max_pixels, --model_max_length
+PER_FRAME_MAX_PIXELS = 200704   # 448 * 448; per-frame H*W cap on top of Qwen3-VL's total budget
+MODEL_MAX_LENGTH = 131072       # tokenizer truncation length used during training
+
+from transformers.models.qwen3_vl import video_processing_qwen3_vl as _vp_mod
+
+_orig_smart_resize = _vp_mod.smart_resize
+
+def _smart_resize_capped(num_frames, height, width, temporal_factor=2, factor=32, min_pixels=None, max_pixels=None):
+    h, w = _orig_smart_resize(
+        num_frames, height, width,
+        temporal_factor=temporal_factor, factor=factor,
+        min_pixels=min_pixels, max_pixels=max_pixels,
+    )
+    if h * w > PER_FRAME_MAX_PIXELS:
+        beta = math.sqrt(h * w / PER_FRAME_MAX_PIXELS)
+        h = max(factor, math.floor(h / beta / factor) * factor)
+        w = max(factor, math.floor(w / beta / factor) * factor)
+    return h, w
+
+_vp_mod.smart_resize = _smart_resize_capped
+
+
+def _print_eval_settings(processor, model_path):
+    """One-time dump of all settings that determine eval behavior. Useful for catching drift."""
+    print("=" * 70, flush=True)
+    print("CHOTAVLM EVAL SETTINGS", flush=True)
+    print("=" * 70, flush=True)
+    print(f"Model checkpoint: {model_path}", flush=True)
+    print(f"--- Runtime overrides (must match training) ---", flush=True)
+    print(f"  PER_FRAME_MAX_PIXELS:   {PER_FRAME_MAX_PIXELS}  (= {int(math.sqrt(PER_FRAME_MAX_PIXELS))}x{int(math.sqrt(PER_FRAME_MAX_PIXELS))})", flush=True)
+    print(f"  MODEL_MAX_LENGTH:       {MODEL_MAX_LENGTH}", flush=True)
+    print(f"  smart_resize patched:   {_vp_mod.smart_resize.__name__ == '_smart_resize_capped'}", flush=True)
+    if processor is not None:
+        vp = processor.video_processor
+        ip = processor.image_processor
+        tok = processor.tokenizer
+        print(f"--- Video processor (from video_preprocessor_config.json) ---", flush=True)
+        print(f"  fps:                   {vp.fps}", flush=True)
+        print(f"  max_frames:            {vp.max_frames}", flush=True)
+        print(f"  min_frames:            {vp.min_frames}", flush=True)
+        print(f"  patch_size:            {vp.patch_size}", flush=True)
+        print(f"  merge_size:            {vp.merge_size}", flush=True)
+        print(f"  temporal_patch_size:   {vp.temporal_patch_size}", flush=True)
+        print(f"  size:                  {vp.size}  (Qwen3-VL total T*H*W budget; per-frame cap added by patch above)", flush=True)
+        print(f"--- Image processor (from preprocessor_config.json) ---", flush=True)
+        print(f"  max_pixels:            {getattr(ip, 'max_pixels', 'n/a')}", flush=True)
+        print(f"  min_pixels:            {getattr(ip, 'min_pixels', 'n/a')}", flush=True)
+        print(f"  size:                  {ip.size}", flush=True)
+        print(f"--- Tokenizer ---", flush=True)
+        print(f"  model_max_length:      {tok.model_max_length}  (overridden to {MODEL_MAX_LENGTH} below)", flush=True)
+    # quick smart_resize sanity test
+    try:
+        h_native, w_native = 1080, 1920
+        h_out, w_out = _vp_mod.smart_resize(60, h_native, w_native, temporal_factor=2, factor=32,
+                                            min_pixels=4096, max_pixels=25165824)
+        print(f"--- smart_resize sanity test ---", flush=True)
+        print(f"  60-frame {h_native}x{w_native} -> {h_out}x{w_out} = {h_out*w_out} pixels/frame "
+              f"({'PATCH ACTIVE' if h_out*w_out <= PER_FRAME_MAX_PIXELS else 'PATCH NOT ACTIVE'})", flush=True)
+    except Exception as e:
+        print(f"  smart_resize test failed: {e}", flush=True)
+    print("=" * 70, flush=True)
 
 
 def main():
@@ -63,6 +130,8 @@ def main():
         sampling_params = SamplingParams(temperature=0, max_tokens=512)
         model = None
         processor = None
+        print("NOTE: smart_resize patch only affects transformers backend; vLLM uses its own video decoder.", flush=True)
+        print(f"  PER_FRAME_MAX_PIXELS={PER_FRAME_MAX_PIXELS} (eval ≠ training behavior under vLLM)", flush=True)
     else:
         import torch
         from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
@@ -86,6 +155,9 @@ def main():
             processor_path,
             cache_dir=os.environ.get("HF_HOME", None),
         )
+        # Match training-time tokenizer truncation length (saved JSON has Qwen3-VL default).
+        processor.tokenizer.model_max_length = MODEL_MAX_LENGTH
+        _print_eval_settings(processor, args.model)
         llm = None
         sampling_params = None
 
