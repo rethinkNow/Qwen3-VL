@@ -1,13 +1,28 @@
 import json
+import math
 import random
 import logging
 import re
+import signal
 import time
 import itertools
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Sequence, List, Tuple, Any
 from collections.abc import Sequence
 from pathlib import Path
+
+# Per-sample fetch timeout. A typical decode is 1-3s; 120s gives huge headroom while
+# catching pathological hangs (corrupted videos, stuck ffmpeg, NFS stalls). When the
+# alarm fires, the sample is treated as a failed fetch and we move on to the next.
+SAMPLE_FETCH_TIMEOUT_SEC = 120
+
+
+class _SampleFetchTimeout(Exception):
+    pass
+
+
+def _alarm_handler(signum, frame):
+    raise _SampleFetchTimeout(f"sample fetch exceeded {SAMPLE_FETCH_TIMEOUT_SEC}s")
 
 import numpy as np
 import torch
@@ -39,6 +54,42 @@ def read_jsonl(path):
 
 def _make_abs_paths(base: Path, files: str) -> str:
     return f"{(base / files).resolve()}"
+
+
+_QWEN3VL_SMART_RESIZE_PATCHED = False
+
+
+def _patch_qwen3vl_smart_resize(per_frame_max_pixels: int):
+    """Cap per-frame H*W at `per_frame_max_pixels` for Qwen3-VL video_processor.
+
+    Qwen3-VL's `size.longest_edge` is a *total* T*H*W budget, so short videos end up at
+    native resolution and long videos collapse. This wraps smart_resize so the per-frame
+    H*W never exceeds `per_frame_max_pixels` (e.g. 200_704 for a 448x448 cap).
+    """
+    global _QWEN3VL_SMART_RESIZE_PATCHED
+    if _QWEN3VL_SMART_RESIZE_PATCHED:
+        return
+    try:
+        from transformers.models.qwen3_vl import video_processing_qwen3_vl as vp_mod
+    except ImportError:
+        return
+
+    original = vp_mod.smart_resize
+
+    def smart_resize_capped(num_frames, height, width, temporal_factor=2, factor=32, min_pixels=None, max_pixels=None):
+        h_bar, w_bar = original(
+            num_frames, height, width,
+            temporal_factor=temporal_factor, factor=factor,
+            min_pixels=min_pixels, max_pixels=max_pixels,
+        )
+        if h_bar * w_bar > per_frame_max_pixels:
+            beta = math.sqrt(h_bar * w_bar / per_frame_max_pixels)
+            h_bar = max(factor, math.floor(h_bar / beta / factor) * factor)
+            w_bar = max(factor, math.floor(w_bar / beta / factor) * factor)
+        return h_bar, w_bar
+
+    vp_mod.smart_resize = smart_resize_capped
+    _QWEN3VL_SMART_RESIZE_PATCHED = True
 
 
 def update_processor_pixels(processor, data_args):
@@ -113,7 +164,9 @@ def update_processor_pixels(processor, data_args):
             vp.fps = data_args.video_fps
             rank0_print(f"✅ Updated video_processor fps to {data_args.video_fps}")
 
-        if hasattr(vp, "size") and isinstance(vp.size, dict):
+        # Only update size for Qwen2-VL/2.5-VL processors that use size dict for per-frame pixels.
+        # Qwen3-VL uses size differently (total budget) — cap per-frame via smart_resize monkey-patch.
+        if hasattr(vp, "min_pixels") and hasattr(vp, "size") and isinstance(vp.size, dict):
             vp.size["shortest_edge"] = data_args.video_min_pixels
             vp.size["longest_edge"] = data_args.video_max_pixels
             rank0_print(
@@ -121,6 +174,11 @@ def update_processor_pixels(processor, data_args):
             )
             rank0_print(
                 f"✅ Updated Video size (longest_edge):  {vp.size.get('longest_edge', 'N/A')}"
+            )
+        else:
+            _patch_qwen3vl_smart_resize(data_args.video_max_pixels)
+            rank0_print(
+                f"✅ Patched Qwen3-VL smart_resize with per-frame cap of {data_args.video_max_pixels} pixels"
             )
 
         rank0_print("=== AFTER VIDEO PROCESSOR PARAMETERS ===")
@@ -250,12 +308,6 @@ class LazySupervisedDataset(Dataset):
         dataset = data_args.dataset_use.split(",")
         dataset_list = data_list(dataset)
         rank0_print(f"Loading datasets: {dataset_list}")
-        self.video_max_total_pixels = getattr(
-            data_args, "video_max_total_pixels", 1664 * 28 * 28
-        )
-        self.video_min_total_pixels = getattr(
-            data_args, "video_min_total_pixels", 256 * 28 * 28
-        )
         self.model_type = data_args.model_type
         if data_args.model_type == "qwen3vl":
             self.get_rope_index = get_rope_index_3
@@ -342,18 +394,31 @@ class LazySupervisedDataset(Dataset):
             print("No pre-calculated length available.")
             return np.array([1] * len(self.list_data_dict))
 
+    def _fetch_with_timeout(self, idx):
+        """Fetch one sample with a SIGALRM-based timeout to detect hung video decodes.
+
+        Runs in DataLoader worker processes (each is its own process, so signals are
+        per-worker). On timeout, raises _SampleFetchTimeout which the retry loop catches.
+        """
+        sources = self.list_data_dict[idx]
+        if isinstance(sources, dict):
+            sources = [sources]
+
+        old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+        signal.alarm(SAMPLE_FETCH_TIMEOUT_SEC)
+        try:
+            return self.item_fn(sources)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
         num_base_retries = 3
-        num_final_retries = 30
 
         # try the current sample first
         for attempt_idx in range(num_base_retries):
             try:
-                sources = self.list_data_dict[i]
-                if isinstance(sources, dict):
-                    sources = [sources]
-                sample = self.item_fn(sources)
-                return sample
+                return self._fetch_with_timeout(i)
             except Exception as e:
                 # sleep 1s in case it is a cloud disk issue
                 print(f"[Try #{attempt_idx}] Failed to fetch sample {i}. Exception:", e)
@@ -361,30 +426,17 @@ class LazySupervisedDataset(Dataset):
 
         # try other samples, in case it is file corruption issue
         for attempt_idx in range(num_base_retries):
+            next_index = min(i + 1 + attempt_idx, len(self.list_data_dict) - 1)
             try:
-                next_index = min(i + 1, len(self.list_data_dict) - 1)
-                sources = self.list_data_dict[next_index]
-                if isinstance(sources, dict):
-                    sources = [sources]
-
-                sample = self.item_fn(sources)
-                return sample
+                return self._fetch_with_timeout(next_index)
             except Exception as e:
-                # no need to sleep
                 print(
                     f"[Try other #{attempt_idx}] Failed to fetch sample {next_index}. Exception:",
                     e,
                 )
-                pass
 
-        try:
-            sources = self.list_data_dict[i]
-            if isinstance(sources, dict):
-                sources = [sources]
-            sample = self.item_fn(sources)
-            return sample
-        except Exception as e:
-            raise e
+        # last resort: try the original index one more time and propagate if it fails
+        return self._fetch_with_timeout(i)
 
     def _get_item(self, sources) -> Dict[str, torch.Tensor]:
         data_dict = preprocess_qwen_visual(
@@ -425,17 +477,6 @@ class LazySupervisedDataset(Dataset):
 
         data_dict["position_ids"] = position_ids
         data_dict["attention_mask"] = [seq_len]
-
-        text = self.processor.tokenizer.decode(
-            data_dict["input_ids"][0], skip_special_tokens=False
-        )
-
-        labels = data_dict["labels"][0]
-        labels = [
-            tid if tid != -100 else self.processor.tokenizer.pad_token_id
-            for tid in labels
-        ]
-        label = self.processor.tokenizer.decode(labels, skip_special_tokens=False)
 
         return data_dict
 

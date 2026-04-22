@@ -7,7 +7,7 @@
 #
 # Args:
 #   remote_path          - Full SSH path: server:/path/to/checkpoint/dir
-#                          e.g. mars3:/home/mars_rover/model_disk/Qwen3-VL/qwen-vl-finetune/output/chotavlm-v0-2b
+#                          e.g. mars3:/home/mars_rover/model_disk/checkpoints/chotavlm-v0-2b
 #   checkpoint_pattern   - Glob pattern for checkpoints (default: checkpoint-*)
 #
 # Environment variables:
@@ -19,7 +19,7 @@
 #   EVAL_BATCH_SIZE     - Batch size (default: 4)
 #
 # Examples:
-#   bash scripts/eval_watcher.sh mars3:/home/mars_rover/model_disk/Qwen3-VL/qwen-vl-finetune/output/chotavlm-v0-2b
+#   bash scripts/eval_watcher.sh mars3:/home/mars_rover/model_disk/checkpoints/chotavlm-v0-2b
 #   bash scripts/eval_watcher.sh mars3:/data/training/run1 "checkpoint-*"
 #   bash scripts/eval_watcher.sh mars3:/data/training/run1 "step-*"
 #   POLL_INTERVAL=60 EVAL_SAMPLES=0 bash scripts/eval_watcher.sh mars3:/path/to/checkpoints
@@ -28,7 +28,7 @@ set -euo pipefail
 
 if [ $# -lt 1 ]; then
     echo "Usage: bash scripts/eval_watcher.sh <server:/path/to/checkpoint/dir> [checkpoint_pattern]"
-    echo "Example: bash scripts/eval_watcher.sh mars3:/home/mars_rover/model_disk/Qwen3-VL/qwen-vl-finetune/output/chotavlm-v0-2b"
+    echo "Example: bash scripts/eval_watcher.sh mars3:/home/mars_rover/model_disk/checkpoints/chotavlm-v0-2b"
     exit 1
 fi
 

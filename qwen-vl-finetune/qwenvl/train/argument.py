@@ -13,7 +13,6 @@ class ModelArguments:
 @dataclass
 class DataArguments:
     dataset_use: str = field(default="")
-    data_path: Optional[str] = field(default=None, metadata={"help": "Direct path to training JSON file"})
     data_flatten: bool = field(default=False)
     data_packing: bool = field(default=False)
     base_interval: int = field(default=2)
@@ -21,8 +20,8 @@ class DataArguments:
     min_pixels: int = field(default=28 * 28 * 16)
     video_max_frames: Optional[int] = field(default=8)
     video_min_frames: Optional[int] = field(default=4)
-    video_max_pixels: int = field(default=1024 * 28 * 28)
-    video_min_pixels: int = field(default=256 * 28 * 28)
+    video_max_pixels: int = field(default=200704, metadata={"help": "Per-frame H*W cap (default 200704 = 448*448)"})
+    video_min_pixels: int = field(default=784)
     video_fps: float = 2
 
 
@@ -45,13 +44,8 @@ class TrainingArguments(transformers.TrainingArguments):
     lora_alpha: int = field(default=128)
     lora_dropout: float = field(default=0.0)
 
-    ## Eval config
+    ## In-process eval config (only used when eval_steps_custom > 0; eval normally runs on a separate server)
     eval_steps_custom: int = field(default=0, metadata={"help": "Run benchmark eval every N steps (0=disabled)"})
-    eval_mode: str = field(default="subset", metadata={"help": "Eval mode: 'subset' or 'full'"})
-    eval_subset_size: int = field(default=200, metadata={"help": "Number of samples per benchmark in subset mode"})
-    eval_benchmarks: str = field(default="dream1k,carebench", metadata={"help": "Comma-separated benchmark names"})
-
-    ## Wandb logging config
-    sample_log_steps: int = field(default=500, metadata={"help": "Log mini eval predictions to wandb every N steps (0=disabled)"})
-    sample_log_count: int = field(default=3, metadata={"help": "Number of samples per benchmark for mini eval logging"})
-    sample_log_workers: int = field(default=4, metadata={"help": "Number of parallel workers for mini eval video decoding"})
+    eval_mode: str = field(default="subset")
+    eval_subset_size: int = field(default=200)
+    eval_benchmarks: str = field(default="dream1k,carebench")

@@ -27,8 +27,18 @@ VIDEOCHATGPT = {
     "data_path": "PATH_TO_VIDEOCHATGPT_DATA",
 }
 
+CHOTAVLM_WEBVID = {
+    "annotation_path": "/data/chotaVLM/annotations/exports/gpt-5-4-webvid-10m_part-1.train.jsonl",
+    "data_path": "",
+}
+
+CHOTAVLM_CHARADES_EGO = {
+    "annotation_path": "/data/chotaVLM/annotations/exports/gpt-5-4-charades-ego.train.jsonl",
+    "data_path": "",
+}
+
 CHOTAVLM_CHARADES = {
-    "annotation_path": os.environ.get("DATA_PATH", "/home/mars_rover/model_disk/chotaVLM/annotations/exports/charades-ego-50.train.jsonl"),
+    "annotation_path": "/data/chotaVLM/annotations/exports/gpt-5-4-charades.train.jsonl",
     "data_path": "",
 }
 
@@ -38,6 +48,8 @@ data_dict = {
     "mp_doc": MP_DOC,
     "clevr_mc": CLEVR_MC,
     "videochatgpt": VIDEOCHATGPT,
+    "chotavlm_webvid": CHOTAVLM_WEBVID,
+    "chotavlm_charades_ego": CHOTAVLM_CHARADES_EGO,
     "chotavlm_charades": CHOTAVLM_CHARADES,
 }
 

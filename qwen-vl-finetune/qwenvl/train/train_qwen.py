@@ -22,6 +22,12 @@ import transformers
 import sys
 from pathlib import Path
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+
 project_root = Path(__file__).parent.parent.parent
 sys.path.append(str(project_root))
 
@@ -203,17 +209,11 @@ def train(attn_implementation="flash_attention_2"):
             f"benchmarks={training_args.eval_benchmarks}"
         )
 
-    # Wandb mini eval callback
-    if training_args.sample_log_steps > 0:
-        from qwenvl.train.logging_callback import WandbTrainingCallback
-        wandb_callback = WandbTrainingCallback(
-            processor=processor,
-            sample_log_steps=training_args.sample_log_steps,
-            num_samples_per_bench=training_args.sample_log_count,
-            num_workers=training_args.sample_log_workers,
-        )
-        callbacks.append(wandb_callback)
-        rank0_print(f"Wandb mini eval enabled: every {training_args.sample_log_steps} steps, {training_args.sample_log_count} samples/bench")
+    # Wandb logging callback: logs training config, sample data, and saves processor on every checkpoint.
+    from qwenvl.train.logging_callback import WandbTrainingCallback
+    wandb_callback = WandbTrainingCallback(processor=processor, data_args=data_args)
+    callbacks.append(wandb_callback)
+    rank0_print("Wandb logging enabled (config + training data + processor save on checkpoint)")
 
     trainer = Trainer(
         model=model, processing_class=tokenizer, args=training_args,

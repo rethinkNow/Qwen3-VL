@@ -120,7 +120,9 @@ def parse_timestamp_events(text: str) -> list[tuple[float, float, str]]:
 
         # Try decimal formats
         patterns = [
-            # <0.0 - 3.5> description  (Qwen3-VL format)
+            # <0.0 seconds - 3.5 seconds> description  (trained chotaVLM format)
+            r"<\s*(\d+\.?\d*)\s*seconds?\s*[-–]\s*(\d+\.?\d*)\s*seconds?\s*>\s*(.+)",
+            # <0.0 - 3.5> description  (Qwen3-VL base format)
             r"<\s*(\d+\.?\d*)\s*[-–]\s*(\d+\.?\d*)\s*>\s*(.+)",
             # 0.0-3.5: description
             r"(\d+\.?\d*)\s*[-–]\s*(\d+\.?\d*)\s*s?\s*[:]\s*(.+)",
@@ -161,9 +163,8 @@ def _parse_time_span(text: str) -> tuple[float, float]:
     if len(mmss) >= 2:
         return (_parse_mmss_to_seconds(mmss[0]), _parse_mmss_to_seconds(mmss[1]))
 
-    # Try decimal seconds: 0.0 - 4.9
-    # Match pairs like "0.0 - 4.9" or "<0.0 - 4.9>"
-    pair = re.search(r"(\d+\.?\d*)\s*[-–]\s*(\d+\.?\d*)", text)
+    # Try decimal seconds: "0.0 - 4.9", "<0.0 - 4.9>", "<0.0 seconds - 4.9 seconds>"
+    pair = re.search(r"(\d+\.?\d*)\s*(?:seconds?)?\s*[-–]\s*(\d+\.?\d*)", text)
     if pair:
         return (float(pair.group(1)), float(pair.group(2)))
 
