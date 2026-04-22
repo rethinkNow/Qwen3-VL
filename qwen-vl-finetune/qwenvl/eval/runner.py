@@ -8,8 +8,6 @@ import gc
 
 import torch
 from torch.utils.data import Dataset, DataLoader
-from qwen_vl_utils import process_vision_info
-from transformers.video_processing_utils import VideoMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -19,9 +17,10 @@ IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".gif", ".tiff")
 class EvalVideoDataset(Dataset):
     """Dataset for parallel video decoding + tokenization in eval.
 
-    Each worker does the full pipeline: video decode → process_vision_info →
-    apply_chat_template → processor tokenization. Returns ready-to-generate
-    inputs (input_ids, pixel_values, etc). Main thread only moves to GPU + generates.
+    Each worker does the full pipeline via processor.apply_chat_template
+    (tokenize=True, return_dict=True) — the SAME call used during training.
+    Returns ready-to-generate inputs (input_ids, pixel_values, etc).
+    Main thread only moves to GPU + generates.
     """
 
     def __init__(self, samples, benchmark, processor, fps=2.0, max_frames=2048):
@@ -49,48 +48,27 @@ class EvalVideoDataset(Dataset):
         try:
             if is_image:
                 messages = [{"role": "user", "content": [
-                    {"type": "image", "image": f"file://{video_path}"},
+                    {"type": "image", "image": video_path},
                     {"type": "text", "text": prompt_text},
                 ]}]
             else:
                 messages = [{"role": "user", "content": [
-                    {"type": "video", "video": f"file://{video_path}", "fps": self.fps, "max_frames": self.max_frames},
+                    {"type": "video", "video": video_path, "fps": self.fps, "max_frames": self.max_frames},
                     {"type": "text", "text": prompt_text},
                 ]}]
 
-            # Full pipeline in worker: decode → tokenize → ready for GPU
-            text = self.processor.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-            image_inputs, video_inputs, video_kwargs = process_vision_info(
-                messages, return_video_kwargs=True, return_video_metadata=True,
-            )
-
-            video_tensors = []
-            video_metadata_list = []
-            if video_inputs:
-                for vi in video_inputs:
-                    if isinstance(vi, tuple):
-                        video_tensors.append(vi[0])
-                        meta_dict = vi[1]
-                        video_metadata_list.append(VideoMetadata(
-                            total_num_frames=meta_dict.get("total_num_frames", 0),
-                            fps=meta_dict.get("fps"),
-                            frames_indices=meta_dict.get("frames_indices"),
-                            video_backend=meta_dict.get("video_backend"),
-                        ))
-                    else:
-                        video_tensors.append(vi)
-
-            # Tokenize in worker (no padding — single sample)
-            inputs = self.processor(
-                text=[text],
-                images=image_inputs,
-                videos=video_tensors if video_tensors else None,
-                padding=False,
+            # Use the SAME call path as training (qwenvl/data/data_processor.py:preprocess_qwen_visual).
+            # The prior two-step split (apply_chat_template tokenize=False + process_vision_info + processor())
+            # drops video metadata, causing the processor to fall back to fps=24 and emit input timestamp
+            # markers compressed by ~10x. This single-call path passes metadata end-to-end correctly so
+            # the <X.X seconds> markers in the prompt match the video's real duration.
+            inputs = self.processor.apply_chat_template(
+                messages,
+                tokenize=True,
+                return_dict=True,
                 return_tensors="pt",
-                do_sample_frames=False,
-                video_metadata=video_metadata_list if video_metadata_list else None,
+                add_generation_prompt=True,
+                padding=False,
             )
 
             return {
@@ -227,48 +205,37 @@ def _prepare_sample(sample, benchmark, processor):
 
 
 def _prepare_sample_inner(video_path, prompt_text, processor):
-    """Inner processing that may raise on video decoding failures."""
+    """Inner processing that may raise on video decoding failures.
 
+    Uses the SAME single-call path as training (qwenvl/data/data_processor.py:preprocess_qwen_visual)
+    so input <X.X seconds> markers match the real video duration. The prior two-step split dropped
+    video metadata and caused the processor to fall back to fps=24, compressing markers ~10x.
+    """
     ext = os.path.splitext(video_path)[1].lower()
     is_image = ext in IMAGE_EXTENSIONS
 
     if is_image:
         messages = [{"role": "user", "content": [
-            {"type": "image", "image": f"file://{video_path}"},
+            {"type": "image", "image": video_path},
             {"type": "text", "text": prompt_text},
         ]}]
     else:
         messages = [{"role": "user", "content": [
-            {"type": "video", "video": f"file://{video_path}", "fps": 2.0, "max_frames": 2048},
+            {"type": "video", "video": video_path, "fps": 2.0, "max_frames": 2048},
             {"type": "text", "text": prompt_text},
         ]}]
 
-    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    image_inputs, video_inputs, video_kwargs = process_vision_info(
-        messages, return_video_kwargs=True, return_video_metadata=True,
+    inputs = processor.apply_chat_template(
+        messages,
+        tokenize=True,
+        return_dict=True,
+        return_tensors="pt",
+        add_generation_prompt=True,
+        padding=False,
     )
 
-    video_tensors = []
-    video_metadata_list = []
-    if video_inputs:
-        for vi in video_inputs:
-            if isinstance(vi, tuple):
-                video_tensors.append(vi[0])
-                meta_dict = vi[1]
-                video_metadata_list.append(VideoMetadata(
-                    total_num_frames=meta_dict.get("total_num_frames", 0),
-                    fps=meta_dict.get("fps"),
-                    frames_indices=meta_dict.get("frames_indices"),
-                    video_backend=meta_dict.get("video_backend"),
-                ))
-            else:
-                video_tensors.append(vi)
-
     return {
-        "text": text,
-        "image_inputs": image_inputs,
-        "video_tensors": video_tensors,
-        "video_metadata_list": video_metadata_list,
+        "inputs": inputs,
         "is_image": is_image,
         "video_path": video_path,
         "prompt_text": prompt_text,
